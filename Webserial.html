@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Serial Data Plot</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <script type="text/javascript" async
+        src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.7/MathJax.js?config=TeX-MML-AM_CHTML">
+        </script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            /* text-align: center; */
+        }
+
+        .container {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-bottom: 10px;
+        }
+
+        .sensor-table {
+            margin: auto;
+            border-collapse: collapse;
+            width: 80%;
+        }
+
+        .sensor-table th,
+        .sensor-table td {
+            border: 1px solid black;
+            padding: 5px;
+            text-align: center;
+        }
+
+        #graph {
+            width: 80vw;
+            margin: auto;
+            height: 80vh;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Serial Data Plot</h1>
+    <h2>Resistance to Temperature Conversion for an NTC Thermistor</h2>
+    This page provides three different conversion types for parsing the values from the RTDAQ. A selection of
+    temperature sensors are already presented as options with parameters pre-populated.
+    However if implementing a custom sensor, please review the following formula and available data sheets to best match
+    the sensor at hand.
+    <h3>Quadratic Approximation</h3>
+    <p>\[
+        T = a + bR + cR^2
+        \]</p>
+    <p>Where:</p>
+    <ul>
+        <li><strong>T</strong> is the temperature in degrees Celsius (°C)</li>
+        <li><strong>R</strong> is the resistance in ohms (Ω)</li>
+        <li><strong>a, b, c</strong> are empirically determined coefficients</li>
+    </ul>
+    <p>Such that:</p>
+    <ul>
+        <li><strong>Coeff A</strong> = a</li>
+        <li><strong>Coeff B</strong> = b</li>
+        <li><strong>Coeff C</strong> = c</li>
+    </ul>
+    <hr>
+    <h3>Steinhart-Hart Equation</h3>
+    <p>\[
+        T = \frac{1}{A + B \ln(R) + C (\ln(R))^3} - 273.15
+        \]</p>
+    <p>Where:</p>
+    <ul>
+        <li><strong>T</strong> is the temperature in degrees Celsius (°C)</li>
+        <li><strong>R</strong> is the resistance in ohms (Ω)</li>
+        <li><strong>A, B, C</strong> are the Steinhart-Hart coefficients, which depend on the thermistor model</li>
+    </ul>
+    <p>Such that:</p>
+    <ul>
+        <li><strong>Coeff A</strong> = A</li>
+        <li><strong>Coeff B</strong> = B</li>
+        <li><strong>Coeff C</strong> = C</li>
+    </ul>
+    <hr>
+    <h3>Beta Formula</h3>
+    <p>\[
+        T = \frac{1}{\frac{1}{T_0} + \frac{1}{\beta} \ln\left( \frac{R}{R_0} \right)} - 273.15
+        \]</p>
+    <p>Where:</p>
+    <ul>
+        <li><strong>T</strong> is the temperature in degrees Celsius (°C)</li>
+        <li><strong>R</strong> is the thermistor resistance at temperature T</li>
+        <li><strong>T_0</strong> is the reference temperature in Kelvin</li>
+        <li><strong>R_0</strong> is the resistance at reference temperature \( T_0 \) (typically 25°C or 298.15K)
+        </li>
+        <li><strong>β</strong> is the Beta parameter, a material-specific constant</li>
+    </ul>
+    <p>Such that:</p>
+    <ul>
+        <li><strong>Coeff A</strong> = T_0</li>
+        <li><strong>Coeff B</strong> = β</li>
+        <li><strong>Coeff C</strong> = R_0</li>
+    </ul>
+    <hr>
+    <div class="container">
+        <button id="importBtn">Import Config</button>
+        <button id="exportBtn">Export Config</button>
+        <input type="file" id="importFile" style="display:none;">
+    </div>
+    <table class="sensor-table">
+        <thead>
+            <tr>
+                <th>Sensor</th>
+                <th>Name</th>
+                <th>Include</th>
+                <th>Probe Type</th>
+                <th>Conversion Method</th>
+                <th>Coeff A</th>
+                <th>Coeff B</th>
+                <th>Coeff C</th>
+            </tr>
+        </thead>
+        <tbody id="sensorList"></tbody>
+    </table>
+    <br>
+    <div class="container">
+        <button id="connectBtn">Connect to Serial Device</button>
+        <button id="exportDataBtn">Export Data</button>
+    </div>
+    <div id="graph"></div>
+
+    <script>
+        let port;
+        let reader;
+        let keepReading = false;
+        let dataPoints = {};
+        let timeStamps = [];
+
+        const defaultCoefficients = {
+            "Resistance": ["Quadratic", 0, 1, 0],
+            "PT100": ["Quadratic", -259.74, 2.5974, 0],
+            "KTY81-210": ["Beta-Equation", 0, 0, 0],
+            "PANE501350": ["Beta-Equation", 298.15, 3500, 500]
+        };
+        function initializeSensors() {
+            let sensorList = document.getElementById("sensorList");
+            sensorList.innerHTML = "";
+            for (let group of ['A', 'B', 'C']) {
+                for (let i = 0; i < 10; i++) {
+                    let key = `${group}${i}`;
+                    dataPoints[key] = [];
+                    let row = document.createElement("tr");
+                    row.innerHTML = `
+                        <td>${key}</td>
+                        <td><input type="text" value="${key}" data-key="${key}" class="sensor-name"></td>
+                        <td><input type="checkbox" data-key="${key}" class="sensor-toggle"></td>
+                        <td>    
+                            <select data-key="${key}" class="probe-type">
+                                <option disabled selected value> -- select an option -- </option>
+                                <option value="Resistance">Resistance</option>
+                                <option value="PT100">PT100</option>
+                                <option value="KTY81-210">KTY81-210</option>
+                                <option value="PANE501350">PANE501350</option>
+                                <option value="custom">Custom</option>
+                            </select>
+                        </td>
+                        <td>
+                            <select data-key="${key}" class="eqn-type">
+                                <option disabled selected value> -- select an option -- </option>
+                                <option value="Quadratic">Quadratic</option>
+                                <option value="Steinhart-Hart">Steinhart-Hart</option>
+                                <option value="Beta-Equation">Beta Equation</option>
+                            </select>
+                        </td>
+                        <td><input type="number" data-key="${key}" class="coeffA" placeholder="A"></td>
+                        <td><input type="number" data-key="${key}" class="coeffB" placeholder="B"></td>
+                        <td><input type="number" data-key="${key}" class="coeffC" placeholder="C"></td>
+                    `;
+                    sensorList.appendChild(row);
+                }
+            }
+            document.querySelectorAll(".probe-type").forEach(select => {
+                select.addEventListener("change", (e) => {
+                    let key = e.target.dataset.key;
+                    let coeffs = defaultCoefficients[e.target.value] || ["Quadratic", 0, 0, 0];
+                    document.querySelector(`.eqn-type[data-key='${key}']`).value = coeffs[0];
+                    document.querySelector(`.coeffA[data-key='${key}']`).value = coeffs[1];
+                    document.querySelector(`.coeffB[data-key='${key}']`).value = coeffs[2];
+                    document.querySelector(`.coeffC[data-key='${key}']`).value = coeffs[3];
+                });
+            });
+        }
+        initializeSensors();
+
+        async function connectSerial() {
+            try {
+                port = await navigator.serial.requestPort();
+                await port.open({ baudRate: 115200 });
+                if (reader) {
+                    await reader.cancel();
+                    reader.releaseLock();
+                }
+                keepReading = true;
+                initializeGraph();
+                readSerialData();
+            } catch (error) {
+                alert("Error connecting to serial device", error);
+            }
+        }
+
+        async function readSerialData() {
+            reader = port.readable.getReader();
+            let decoder = new TextDecoder();
+            let buffer = '';
+
+            try {
+                while (keepReading) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+                    let lines = buffer.split("\n");
+                    buffer = lines.pop();
+                    lines.forEach(line => processSerialData(line.trim()));
+                }
+            } catch (error) {
+                alert("Error reading serial data:", error);
+            } finally {
+                reader.releaseLock();
+            }
+        }
+
+        function processSerialData(data) {
+            console.log("Serial Data: " + data);
+
+            let values = data.split(":")[1]; // Only care about the values and not the "ALL" section
+            let entries = values.split(",");
+            let parsedData = {};
+
+            let counter = 0;
+            let timestamp = Date.now(); // Capture timestamp in milliseconds
+
+            entries.forEach(entry => {
+                let letter = ["A", "B", "C"][Math.floor(counter / 10)];
+                let index = counter % 10;
+                let key = letter + index;
+
+                let value = entry;
+                parsedData[key] = value === "inf" ? null : convertToTemperature(key, parseFloat(value));
+
+                counter++;
+            });
+
+            // Store the precise timestamp
+            timeStamps.push(timestamp);
+
+            document.querySelectorAll(".sensor-toggle:checked").forEach(input => {
+                let key = input.dataset.key;
+                if (parsedData[key] !== null) {
+                    dataPoints[key].push(parsedData[key]);
+                }
+            });
+
+            updateGraph();
+        }
+
+
+        function convertToTemperature(key, resistance) {
+            let eqn = document.querySelector(`.eqn-type[data-key='${key}']`).value;
+            let a = parseFloat(document.querySelector(`.coeffA[data-key='${key}']`).value);
+            let b = parseFloat(document.querySelector(`.coeffB[data-key='${key}']`).value);
+            let c = parseFloat(document.querySelector(`.coeffC[data-key='${key}']`).value);
+
+            let temp = null;
+
+            if (eqn == "Quadratic") {
+                temp = a + b * resistance + c * resistance * resistance;
+            }
+            if (eqn == "Steinhart-Hart") {
+                temp = (1 / (a + b * Math.log(resistance) + c * Math.pow(Math.log(resistance), 3))) - 273.15
+            }
+            if (eqn == "Beta-Equation") {
+                temp = (1 / ((1 / a) + (1 / b) * Math.log(resistance / c))) - 273.15
+            }
+
+            console.log(key, resistance, temp);
+            return temp
+        }
+
+        function initializeGraph() {
+            let traces = [];
+            document.querySelectorAll(".sensor-toggle:checked").forEach(input => {
+                let key = input.dataset.key;
+                let nameInput = document.querySelector(`.sensor-name[data-key='${key}']`).value;
+                if (nameInput) {
+                    traces.push({ x: [], y: [], mode: 'lines', name: nameInput });
+                }
+            });
+
+            let layout = {
+                title: 'Sensor Data',
+                autosize: true
+            }
+
+            Plotly.newPlot('graph', traces, layout);
+        }
+
+        function updateGraph() {
+            let xData = [];
+            let yData = [];
+            let names = [];
+
+            document.querySelectorAll(".sensor-toggle:checked").forEach(input => {
+                let key = input.dataset.key;
+                let nameInput = document.querySelector(`.sensor-name[data-key='${key}']`).value;
+                if (nameInput) {
+                    // Convert timestamps from ms to "hh:mm:ss.sss" (including milliseconds)
+                    let formattedTimes = timeStamps.map(ts => {
+                        let date = new Date(ts);
+                        return date.toLocaleTimeString() + '.' + date.getMilliseconds().toString().padStart(3, '0');
+                    });
+
+                    xData.push(formattedTimes);
+                    yData.push(dataPoints[key]);
+                    names.push(nameInput);
+                }
+            });
+
+            Plotly.update('graph', { x: xData, y: yData }, { title: 'Sensor Data' });
+        }
+
+        document.getElementById("connectBtn").addEventListener("click", connectSerial);
+
+
+
+
+
+
+
+
+        document.getElementById("exportBtn").addEventListener("click", function () {
+            let sensors = [];
+            document.querySelectorAll("#sensorList tr").forEach(row => {
+                let key = row.cells[0].textContent;
+                let name = row.querySelector(".sensor-name").value;
+                let include = row.querySelector(".sensor-toggle").checked;
+                let probe = row.querySelector(".probe-type").value;
+                let eqn = row.querySelector(".eqn-type").value;
+                let a = row.querySelector(".coeffA").value;
+                let b = row.querySelector(".coeffB").value;
+                let c = row.querySelector(".coeffC").value;
+                sensors.push({ key, name, include, probe, eqn, a, b, c });
+            });
+
+            let dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(sensors));
+            let downloadAnchor = document.createElement("a");
+            downloadAnchor.setAttribute("href", dataStr);
+            downloadAnchor.setAttribute("download", "sensor_config.json");
+            document.body.appendChild(downloadAnchor);
+            downloadAnchor.click();
+            document.body.removeChild(downloadAnchor);
+        });
+
+        document.getElementById("importBtn").addEventListener("click", function () {
+            document.getElementById("importFile").click();
+        });
+
+        document.getElementById("importFile").addEventListener("change", function (event) {
+            let file = event.target.files[0];
+            if (!file) return;
+
+            let reader = new FileReader();
+            reader.onload = function (e) {
+                let sensors = JSON.parse(e.target.result);
+                sensors.forEach(sensor => {
+                    let row = Array.from(document.querySelectorAll("#sensorList tr"))
+                        .find(r => r.cells[0].textContent.trim() === sensor.key);
+                    if (row) {
+                        row.querySelector(".sensor-name").value = sensor.name;
+                        row.querySelector(".sensor-toggle").checked = sensor.include;
+                        row.querySelector(".probe-type").value = sensor.probe;
+                        row.querySelector(".eqn-type").value = sensor.eqn;
+                        row.querySelector(".coeffA").value = sensor.a;
+                        row.querySelector(".coeffB").value = sensor.b;
+                        row.querySelector(".coeffC").value = sensor.c;
+                    }
+                });
+            };
+            reader.readAsText(file);
+        });
+
+
+        // document.getElementById("exportDataBtn").addEventListener("click", function () {
+        //     let exportedData = [];
+
+        //     // Loop through all recorded sensor data
+        //     Object.keys(dataPoints).forEach(sensor => {
+        //         if (dataPoints[sensor].length > 0) {
+        //             let sensorData = dataPoints[sensor].map((value, index) => ({
+        //                 timestamp: timeStamps[index], // Keep timestamp aligned with readings
+        //                 value: value
+        //             }));
+
+        //             exportedData.push({ sensor: sensor, data: sensorData });
+        //         }
+        //     });
+
+        //     // Convert to JSON and trigger download
+        //     let dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(exportedData, null, 2));
+        //     let downloadAnchor = document.createElement("a");
+        //     downloadAnchor.setAttribute("href", dataStr);
+        //     downloadAnchor.setAttribute("download", "sensor_data.json");
+        //     document.body.appendChild(downloadAnchor);
+        //     downloadAnchor.click();
+        //     document.body.removeChild(downloadAnchor);
+        // });
+
+        document.getElementById("exportDataBtn").addEventListener("click", function () {
+            if (timeStamps.length === 0) {
+                alert("No data available to export.");
+                return;
+            }
+
+            // Step 1: Collect unique timestamps and sort them
+            let uniqueTimestamps = [...new Set(timeStamps)].sort((a, b) => a - b);
+
+            // Step 2: Prepare header row (Timestamp + Sensor Names)
+            let sensorKeys = Object.keys(dataPoints).filter(key => dataPoints[key].length > 0);
+            let headerRow = ["Timestamp", "Time", ...sensorKeys];
+
+            // Step 3: Create rows with synchronized timestamps
+            let csvData = uniqueTimestamps.map(timestamp => {
+                let row = [timestamp, new Date(timestamp).toLocaleTimeString() + '.' + new Date(timestamp).getMilliseconds().toString().padStart(3, '0')];
+
+                // Append sensor data, using null for missing values
+                sensorKeys.forEach(sensor => {
+                    let index = timeStamps.indexOf(timestamp);
+                    row.push(index !== -1 && dataPoints[sensor][index] !== undefined ? dataPoints[sensor][index] : "");
+                });
+
+                return row.join(",");
+            });
+
+            // Step 4: Generate CSV content
+            let csvContent = [headerRow.join(","), ...csvData].join("\n");
+
+            // Step 5: Trigger file download
+            let blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+            let url = URL.createObjectURL(blob);
+            let downloadAnchor = document.createElement("a");
+            downloadAnchor.setAttribute("href", url);
+            downloadAnchor.setAttribute("download", "sensor_data.csv");
+            document.body.appendChild(downloadAnchor);
+            downloadAnchor.click();
+            document.body.removeChild(downloadAnchor);
+        });
+
+
+    </script>
+</body>
+
+</html>
